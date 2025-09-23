@@ -1,0 +1,3 @@
+[submodule "Projects/Project1"]
+	path = Projects/Project1
+	url = https://github.com/thiagoviegas06/computerVision-Project.git

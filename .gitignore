@@ -257,3 +257,9 @@ kaggleUsername.txt
 
 #Zip Files
 *.zip
+
+# Ignore sbatch files
+*.sbatch
+*.sh
+*.ext3
+
