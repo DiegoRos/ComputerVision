@@ -10,8 +10,8 @@ import numpy as np
 from tqdm import tqdm
 import sys
 
-from pitch_dataset import PitchDataset
-from pitch_model import MultiTaskPitchModel
+from other_pitch_dataset import PitchDataset
+from other_pitch_model import MultiTaskPitchModel
 
 PHYSICS_COLS = [
     'release_speed', 'release_spin_rate', 'release_extension',
@@ -42,7 +42,6 @@ csv_test_header_labels = [
     "release_spin_rate", "release_pos_x", "release_pos_y", "release_pos_z",
     "release_extension", "pfx_x", "pfx_z", "stand", "p_throws"
 ]
-
 
 # For training the model we want to create a train/val/test split with a 70/20/10 spilt
 def create_data_loaders(csv_path, video_dir, yolo_model_dir, batch_size=4, shuffle=True):
@@ -87,45 +86,39 @@ def create_data_loaders(csv_path, video_dir, yolo_model_dir, batch_size=4, shuff
 
     return train_loader, val_loader, test_loader
 
+
+# Updated Validate function to handle 3 outputs
 def validate(model, loader, device):
     model.eval()
     total_loss = 0
-    # Use HuberLoss in validation too for consistency
     criterion_reg = nn.HuberLoss(delta=1.0)
     criterion_cls = nn.BCEWithLogitsLoss()
-    alpha = 0.2
-
+    # FIX: Added label smoothing for validation consistency
+    criterion_zone = nn.CrossEntropyLoss(label_smoothing=0.1) 
+    
+    w_reg = 1.0
+    w_cls = 0.2
+    w_zone = 0.2
+    
     with torch.no_grad():
-        # Added tqdm for validation progress
-        pbar = tqdm(loader,total=len(loader), desc="Validating", leave=False)
+        pbar = tqdm(loader, desc="Validating", leave=False)
         for batch in pbar:
             traj = batch['trajectory'].to(device)
             phys = batch['physics'].to(device)
             target_coords = batch['labels'].to(device)
             target_class = batch['class_label'].to(device)
-
-            pred_coords, pred_logits = model(traj, phys)
-
+            target_zone = batch['zone_label'].to(device)
+            
+            pred_coords, pred_logits, pred_zone_logits = model(traj, phys)
+            
             loss_coords = criterion_reg(pred_coords, target_coords)
             loss_class = criterion_cls(pred_logits.squeeze(), target_class)
-            loss = loss_coords + (alpha * loss_class)
+            loss_zone = criterion_zone(pred_zone_logits, target_zone)
+            
+            loss = (w_reg * loss_coords) + (w_cls * loss_class) + (w_zone * loss_zone)
             total_loss += loss.item()
-
-            # Optional: update pbar description with current loss if desired
-            # pbar.set_postfix({'val_loss': loss.item()})
-
+            
     return total_loss / len(loader)
-
-def check_tensor(name, tensor):
-    """Returns True if tensor is invalid (NaN or Inf)"""
-    if torch.isnan(tensor).any():
-        print(f"!!! {name} HAS NaNs !!!")
-        return True
-    if torch.isinf(tensor).any():
-        print(f"!!! {name} HAS Infs !!!")
-        return True
-    return False
-
 
 def main():
     print("Starting Training Script...")
@@ -153,7 +146,7 @@ def main():
     BATCH_SIZE = 4
     ACCUMULATION_STEPS = 8  # Effective Batch Size = 4 * 8 = 32
     LEARNING_RATE = 1e-4    # Lower, constant LR is safer
-    NUM_EPOCHS = 20
+    NUM_EPOCHS = 5
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Training on device: {device}")
@@ -162,94 +155,69 @@ def main():
     torch.autograd.set_detect_anomaly(True)
 
     model = MultiTaskPitchModel(physics_dim=9).to(device)
-
-    # Removed Weight Decay for now to isolate the gradient issue
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
 
-    # FIX 1: Change MSELoss to HuberLoss
-    # HuberLoss is quadratic for small errors, linear for large errors (outliers).
-    # This prevents a single bad prediction from generating a massive gradient.
+    # Define 3 Losses
     criterion_reg = nn.HuberLoss(delta=1.0)
     criterion_cls = nn.BCEWithLogitsLoss()
-    alpha = 0.2
+    
+    # FIX: LABEL SMOOTHING (The "Garbage Prevention" trick)
+    # This prevents the model from becoming overconfident on ambiguous zones,
+    # which keeps the gradients cleaner for the other tasks.
+    criterion_zone = nn.CrossEntropyLoss(label_smoothing=0.1)
+    
+    # Loss Weights
+    w_reg = 1.0
+    w_cls = 0.2
+    w_zone = 0.2
 
     history = {'train_loss_step': [], 'val_loss': [], 'epoch': []}
-    print("\nStarting Training with Gradient Accumulation & Huber Loss...")
+    print("\nStarting Training with Decoupled Heads & Label Smoothing...")
 
     for epoch in range(NUM_EPOCHS):
         model.train()
         running_loss = 0.0
+        
         halfway_point = len(train_dl) // 2
-
-        pbar = tqdm(train_dl, total=len(train_dl), desc=f"Epoch {epoch+1}/{NUM_EPOCHS}")
-
-        # Initialize gradients once before loop
+        
+        pbar = tqdm(enumerate(train_dl), total=len(train_dl), desc=f"Epoch {epoch+1}/{NUM_EPOCHS}")
+        
         optimizer.zero_grad()
-
+        
         for i, batch in pbar:
             traj = batch['trajectory'].to(device)
             phys = batch['physics'].to(device)
-            phys_raw = batch['physics_raw'] # Keep on CPU for debug printing
             target_coords = batch['labels'].to(device)
             target_class = batch['class_label'].to(device)
-
-            # --- DEBUGGING: Check Inputs ---
-            if i > 80: # Start monitoring before the known crash point (approx 100)
-                if check_tensor(f"Step {i} Input Traj", traj):
-                    print(f"Traj Min: {traj.min()}, Max: {traj.max()}")
-                    raise ValueError("Traj Min/Max Error")
-                if check_tensor(f"Step {i} Input Phys", phys):
-                    print(f"Phys Min: {phys.min()}, Max: {phys.max()}")
-                    print(f"Raw Physics Dump: \n{phys_raw}")
-                    raise ValueError("Phys Min/Max Error")
-
-            # Forward
-            pred_coords, pred_logits = model(traj, phys)
-
-            # --- DEBUGGING: Check Outputs ---
-            if i > 80:
-                if check_tensor(f"Step {i} Pred Coords", pred_coords): sys.exit(1)
-
+            target_zone = batch['zone_label'].to(device)
+            
+            # Forward 3 outputs
+            pred_coords, pred_logits, pred_zone_logits = model(traj, phys)
+            
+            # Calculate 3 losses
             loss_coords = criterion_reg(pred_coords, target_coords)
             loss_class = criterion_cls(pred_logits.squeeze(), target_class)
-
-            # Combine Loss
-            loss = loss_coords + (alpha * loss_class)
-
-            # --- DEBUGGING: Check Loss ---
-            if torch.isnan(loss) or torch.isinf(loss):
-                print(f"\n\n!!!!!!!! CRASH AT STEP {i} !!!!!!!!")
-                print(f"Loss Coords: {loss_coords.item()}")
-                print(f"Loss Class: {loss_class.item()}")
-                print("Inputs for this batch:")
-                print(f"Traj stats: Min={traj.min().item():.4f}, Max={traj.max().item():.4f}")
-                print(f"Phys stats: Min={phys.min().item():.4f}, Max={phys.max().item():.4f}")
-                print(f"Targets: \n{target_coords.cpu().numpy()}")
-                print(f"Raw Physics: \n{phys_raw.numpy()}")
-                raise ValueError("Loss NaN/Inf")
-
-            # FIX 2: Gradient Accumulation
-            # Scale loss by accumulation steps so the backward pass is averaged correctly
+            loss_zone = criterion_zone(pred_zone_logits, target_zone)
+            
+            # Weighted Sum
+            loss = (w_reg * loss_coords) + (w_cls * loss_class) + (w_zone * loss_zone)
+            
+            # Accumulation
             loss = loss / ACCUMULATION_STEPS
             loss.backward()
-
-            # We only step the optimizer every N steps
+            
             if (i + 1) % ACCUMULATION_STEPS == 0:
-                # FIX 3: Clip Gradients (Keep this)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
                 optimizer.step()
                 optimizer.zero_grad()
-
-            # Scale loss back up for display purposes
+            
             current_loss = loss.item() * ACCUMULATION_STEPS
             running_loss += current_loss
-
+            
             pbar.set_postfix({'loss': current_loss})
             history['train_loss_step'].append(current_loss)
 
             if i == halfway_point:
-                print("Validating...")
                 val_loss = validate(model, val_dl, device)
                 history['val_loss'].append(val_loss)
                 history['epoch'].append(epoch + 0.5)
@@ -259,13 +227,13 @@ def main():
         val_loss = validate(model, val_dl, device)
         history['val_loss'].append(val_loss)
         history['epoch'].append(epoch + 1.0)
-
+        
         avg_train_loss = running_loss / len(train_dl)
         print(f"\nEpoch {epoch+1} Results: Train Loss: {avg_train_loss:.4f} | End Val Loss: {val_loss:.4f}")
 
     print("\nTraining Complete.")
 
-    save_path = f"competition_folder/multitask_model_{NUM_EPOCHS}epochs.pth"
+    save_path = f"competition_folder/multitask_model_with_zones_{NUM_EPOCHS}epochs.pth"
     torch.save(model.state_dict(), save_path)
 
 if __name__ == "__main__":
