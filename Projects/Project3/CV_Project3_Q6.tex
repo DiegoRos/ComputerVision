@@ -1,0 +1,292 @@
+\documentclass[a4paper,11pt]{article}
+%\documentclass[a4paper,11pt,twocolumn]{article}%twocolumn layout; not sure if this works correctly. Feel free to experiment.
+\usepackage[pdftex]{color,graphicx}
+\usepackage[T1]{fontenc}
+\usepackage{pxfonts}
+\usepackage{subfigure}
+\usepackage{xcolor}
+\usepackage[makeroom]{cancel}
+
+%color links to figs, etc.
+%\usepackage[pdftex,colorlinks,urlcolor=blue,breaklinks]{hyperref}
+\usepackage[pdftex,colorlinks]{hyperref}
+\hypersetup{colorlinks,%
+	citecolor=black,%
+	filecolor=black,%
+	linkcolor=black,%
+	urlcolor=black,%
+	breaklinks=true,%
+	pdftex}
+
+%easily manipulate margins
+\usepackage{geometry}
+\makeatletter
+\if@twocolumn%
+\geometry{twoside,
+	paperwidth=210mm,
+	paperheight=297mm,
+	textheight=682pt,
+	textwidth=516pt,
+	centering,
+	headheight=50pt,
+	headsep=12pt,
+	footskip=18pt,
+	footnotesep=24pt plus 2pt minus 12pt,
+	columnsep=14pt}	
+\else%if using twocolumns, I still need to modify the textwidth to accomodate the watermark
+\geometry{twoside,
+	paperwidth=210mm,
+	paperheight=297mm,
+	textheight=750pt,
+	textwidth=500pt,
+	centering,
+	headheight=50pt,
+	headsep=12pt,
+	footskip=18pt,
+	footnotesep=24pt plus 2pt minus 12pt}
+\fi%
+
+%change the font
+\usepackage{charter}
+
+%CC logos to add in the footer
+% \usepackage{ccicons}
+
+%easily manipulate color
+\usepackage{color}
+
+\usepackage[utf8]{inputenc} % allow utf-8 input
+\usepackage[T1]{fontenc}    % use 8-bit T1 fonts
+\usepackage{hyperref}       % hyperlinks
+\usepackage{url}            % simple URL typesetting
+\usepackage{booktabs}       % professional-quality tables
+\usepackage{amsfonts}       % blackboard math symbols
+\usepackage{nicefrac}       % compact symbols for 1/2, etc.
+\usepackage{microtype}      % microtypography
+\usepackage{amsmath}
+\allowdisplaybreaks
+\usepackage{algorithmicx}
+\usepackage{algorithm, algpseudocode}
+\usepackage{graphicx}
+\usepackage{adjustbox}
+\usepackage{mathrsfs}
+
+%nicely print bioRxiv
+\newcommand{\biorxiv}{\emph{bio{\color{red}R}$\chi$iv}}
+
+%add biorxiv type of article using the package background
+\usepackage{tikz}
+\usepackage[firstpage=True]{background}
+
+\usepackage{tabularx} 
+
+\newcommand{\newresults}{
+	\makeatletter
+	\if@twocolumn%
+	\backgroundsetup{
+		position={0.572\paperwidth,-0.025\paperheight} ,
+		angle=270,
+		color=black,
+		opacity=0.60,
+		scale=1.5,
+		contents={\tikz\node[text=black,fill=gray!40,align=left, minimum width=2.3cm,minimum height=0.6cm,inner sep=0]{New Results};}}
+	\else
+	\backgroundsetup{
+		position={0.338\paperwidth,-0.06\paperheight} ,
+		angle=270,
+		color=black,
+		opacity=0.60,
+		scale=2.5,
+		contents={\tikz\node[text=black,fill=gray!40,align=left, minimum width=2.3cm,minimum height=0.6cm,inner sep=0]{New Results};}}
+	\fi%
+}
+
+\newcommand{\confirmatoryresults}{
+	\makeatletter
+	\if@twocolumn%
+	\backgroundsetup{
+		position={0.572\paperwidth,-0.03\paperheight} ,
+		angle=270,
+		color=black,
+		opacity=0.60,
+		scale=1.5,
+		contents={\tikz\node[text=black,fill=gray!40,align=left, minimum width=3.9cm,minimum height=0.6cm,inner sep=0]{Confirmatory Results};}}
+	\else
+	\backgroundsetup{
+		position={0.338\paperwidth,-0.07\paperheight} ,
+		angle=270,
+		color=black,
+		opacity=0.60,
+		scale=2.5,
+		contents={\tikz\node[text=black,fill=gray!40,align=left, minimum width=3.9cm,minimum height=0.6cm,inner sep=0]{Confirmatory Results};}}
+	\fi%
+}
+
+\newcommand{\contradictoryresults}{
+	\makeatletter
+	\if@twocolumn%
+	\backgroundsetup{
+		position={0.572\paperwidth,-0.03\paperheight} ,
+		angle=270,
+		color=black,
+		opacity=0.0,
+		scale=1.5,
+		contents={\tikz\node[text=black,fill=gray!40,align=left, minimum width=4.0cm,minimum height=0.6cm,inner sep=0]{};}}
+	\else
+	\backgroundsetup{
+		position={0.338\paperwidth,-0.07\paperheight} ,
+		angle=270,
+		color=black,
+		opacity=0.0,
+		scale=2.5,
+		contents={\tikz\node[text=black,fill=gray!40,align=left, minimum width=4.0cm,minimum height=0.6cm,inner sep=0]{};}}
+	\fi%
+}
+
+%enhanced floats
+\usepackage{float}
+
+%rotate floats if necessary
+\usepackage{rotating}
+
+%nicer, clever tables, uncomment if necessary
+\usepackage{supertabular}
+
+%tables with notes, etc., uncomment if necessary
+%\usepackage{threeparttable}
+
+%improved captions, uncomment if necessary
+\usepackage{caption}
+
+%add an author block
+\usepackage{authblk}
+%redefine authorblock font size and affiliation font size
+\renewcommand\Authfont{\small}
+\renewcommand\Affilfont{\scriptsize}
+
+%add nice headers
+\usepackage{fancyhdr}
+\pagestyle{fancy}
+\renewcommand{\headrulewidth}{0pt}
+\lhead{{\footnotesize }}
+\chead{}
+\rhead{{\footnotesize }}
+\lfoot{}
+\cfoot{\thepage}
+% \rfoot{\biorxiv}
+
+
+\usepackage{draftwatermark}
+\makeatletter
+\if@twocolumn
+\SetWatermarkText{}
+\SetWatermarkScale{0.20}
+\SetWatermarkAngle{270}
+%note: I defined this commands in the draftwatermark.sty file. For some reason they are in teh manual but not in the sty file...
+\SetWatermarkHorCenter{0.97\paperwidth}
+\SetWatermarkVerCenter{-.88\paperheight}
+\else
+\SetWatermarkText{}
+\SetWatermarkScale{0.25}
+\SetWatermarkAngle{270}
+%note: I defined this commands in the draftwatermark.sty file. For some reason they are in teh manual but not in the sty file...
+\SetWatermarkHorCenter{0.95\paperwidth}
+\SetWatermarkVerCenter{-.82\paperheight}
+\fi
+
+%uncomment the type of bioRxiv preprint below to added to the first page
+%\newresults{}
+%\confirmatoryresults{}
+\contradictoryresults{}
+
+%flushleft the title, authorblock and Abstract
+%modified from http://tex.stackexchange.com/questions/85343/left-align-abstract-title-and-authors
+\makeatletter
+\renewcommand{\maketitle}{\bgroup\setlength{\parindent}{0pt}
+	\begin{flushleft}
+		\thispagestyle{plain}
+		\textbf{\@title}
+		
+		\@author
+	\end{flushleft}\egroup
+}
+\makeatother
+
+%redefine the abstract
+\renewenvironment{abstract}
+{\small
+	\begin{flushleft}
+		\textbf{\abstractname}\vspace{-0.40em}\vspace{0pt}
+	\end{flushleft}
+	\list{}{
+		\setlength{\leftmargin}{0cm}%
+		\setlength{\rightmargin}{\leftmargin}%
+	}%
+	\item\relax}
+{\endlist}
+
+\hyphenation{}
+
+\renewcommand*{\thefootnote}{\fnsymbol{footnote}}
+
+%if to do notes need to be added: need to configure this!
+\usepackage[colorinlistoftodos]{todonotes}
+
+%feel free to change the reference style to suit your needs
+\usepackage[firstinits=true, backref=false, maxcitenames=1,  hyperref=auto, style=authoryear, defernumbers=true, backend=bibtex]{biblatex}[2010/11-19]
+
+%change the name of this file to point to your bib file.
+\bibliography{./Bibliography/Literature}
+
+\newcommand{\yz}[1]{{\color{blue}[Yizi: #1]}}
+
+\definecolor{dodgerblue}{rgb}{0.12, 0.56, 1.0}
+\definecolor{lightseagreen}{rgb}{0.13, 0.7, 0.67}
+\definecolor{mediumorchid}{rgb}{0.73, 0.33, 0.83}
+\definecolor{electriclavender}{rgb}{0.96, 0.73, 1.0}
+\definecolor{royalazure}{rgb}{0.0, 0.22, 0.66}
+\definecolor{cadetgrey}{rgb}{0.57, 0.64, 0.69}
+\definecolor{applegreen}{rgb}{0.55, 0.71, 0.0}
+\definecolor{darkpastelpurple}{rgb}{0.59, 0.44, 0.84}
+\definecolor{purpleheart}{rgb}{0.41, 0.21, 0.61}
+
+
+
+\begin{document}
+
+\title{\Large Computer Vision CS-GY 6643 - Project 3
+	\newline}
+\author{Diego Rosenberg dr3432@nyu.edu\\Thiago Viegas tjv235@nyu.edu}
+
+
+
+\date{}
+
+\maketitle
+%\tableofcontents
+
+\noindent
+
+\section*{Question 6}
+
+\begin{enumerate}
+	\item The core of the \textbf{Lucas-Kanade} optical flow method involves solving the overdetermined system $\mathbf{Au} = \mathbf{b}$ for the flow vector $\mathbf{u}$ in a local window. The least-squares solution is given by:
+	\[
+	\mathbf{u} = (A^T A)^{-1}A^T \mathbf{b}
+	\]
+	Let $\mathbf{G} = A^T A$ be the $2 \times 2$ \textbf{Structure Tensor} (or Gram Matrix) of the window.\\
+	Prove that a reliable and unique solution for the flow vector $\mathbf{u}$ exists \textbf{if and only if} the Structure Tensor $\mathbf{G}$ is \textbf{invertible}.
+	
+	\item The change in image intensity $E(u, v)$ when a window is shifted by a vector $\mathbf{d} = [u, v]^T$ is approximated using the \textbf{Second Moment Matrix M}:
+	\[
+	E(u, v) \approx \mathbf{d}^T \mathbf{M} \mathbf{d}
+	\]
+	Prove that if a region is an ideal, straight, uniform edge (not a corner), one of the eigenvalues of $\mathbf{M}$ must be zero.
+	
+	\item In the \textbf{Horn-Schunck} optical flow method, the smoothness term $\mathcal{E}_s$ penalizes the squared magnitude of the gradient of the flow field. For a vector $\mathbf{v} = [v_1, v_2, \dots, v_n]^T$, the squared Frobenius Norm is defined as $||\mathbf{v}||_F^2 = \sum_{i=1}^n v_i^2$.
+	
+	Prove that the term $\left(\frac{\partial u}{\partial x}\right)^2 + \left(\frac{\partial u}{\partial y}\right)^2$ can be expressed as the squared Frobenius Norm of the flow gradient vector $\nabla u = \left[\frac{\partial u}{\partial x}, \frac{\partial u}{\partial y}\right]^T$.
+\end{enumerate}
+
+
+\end{document} 
