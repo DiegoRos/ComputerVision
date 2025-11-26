@@ -9,8 +9,8 @@ from tqdm import tqdm
 import sys
 import os
 
-from pitch_dataset import PitchDataset
-from pitch_model import MultiTaskPitchModel
+from other_pitch_dataset import PitchDataset
+from other_pitch_model import MultiTaskPitchModel
 
 
 PHYSICS_COLS = [
