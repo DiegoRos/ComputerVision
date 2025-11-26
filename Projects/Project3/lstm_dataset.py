@@ -4,25 +4,30 @@ import pandas as pd
 import numpy as np
 import cv2
 import os
-import json  # Added for saving/loading stats
+import json
 from ultralytics import YOLO
+from tqdm import tqdm
 
 class PitchDataset(Dataset):
-    def __init__(self, data_frame, video_root_dir, yolo_model_path, transform=None, mode='train', fps=60, stats=None):
+    def __init__(self, data_frame, video_root_dir, yolo_model_path, transform=None, mode='train', fps=60, stats=None, cache_dir=None):
         """
         Args:
             data_frame (pd.DataFrame): DataFrame with annotations.
             video_root_dir (string): Directory with all the videos.
             yolo_model_path (string): Path to the trained YOLO .pt file.
-            fps (int): Framerate of the video (usually 60 for MLB pitch clips).
-            stats (dict or str, optional): Dictionary or Path to JSON file containing pre-computed means/stds. 
-                                           CRITICAL: Must pass this for Validation/Test sets.
+            fps (int): Framerate.
+            stats (dict/str): Stats for normalization.
+            cache_dir (string, optional): Directory to save/load pre-processed trajectories.
         """
         self.data_frame = data_frame
         self.video_root_dir = video_root_dir
         self.transform = transform
         self.mode = mode
         self.fps = fps
+        self.cache_dir = cache_dir
+
+        if self.cache_dir:
+            os.makedirs(self.cache_dir, exist_ok=True)
 
         # --- LAZY LOADING SETUP ---
         self.yolo_model_path = yolo_model_path
@@ -42,9 +47,7 @@ class PitchDataset(Dataset):
 
         self.target_cols = ['plate_x', 'plate_z']
 
-        # --- LOGIC: LOAD STATS OR CALCULATE ---
-        
-        # 1. If stats is a file path, load it
+        # 1. Load Stats
         if isinstance(stats, str):
             if os.path.exists(stats):
                 print(f"Loading normalization stats from {stats}...")
@@ -53,7 +56,6 @@ class PitchDataset(Dataset):
             else:
                 raise FileNotFoundError(f"Stats file not found at {stats}")
 
-        # 2. Use provided stats (Validation/Test) or calculate new ones (Train)
         if stats:
             self.means = stats['means']
             self.stds = stats['stds']
@@ -61,75 +63,92 @@ class PitchDataset(Dataset):
             self.stds_target = stats['stds_target']
         else:
             if self.mode == 'test':
-                print("WARNING: You are initializing a TEST dataset without providing 'stats'.")
-                print("         This will calculate stats from the Test set, which causes DATA LEAKAGE.")
-                print("         Please load the stats saved from your Training set.")
-
-            print("Calculating dataset statistics for normalization from current dataframe...")
+                print("WARNING: TEST dataset without stats provided. Possible DATA LEAKAGE.")
+            
+            print("Calculating dataset statistics for normalization...")
             self.means = self.data_frame[self.norm_cols].mean().to_dict()
             self.stds = self.data_frame[self.norm_cols].std().to_dict()
             
-            # For targets, we only calculate if we are in training mode or if targets exist
             if all(col in self.data_frame.columns for col in self.target_cols):
                 self.means_target = self.data_frame[self.target_cols].mean().to_dict()
                 self.stds_target = self.data_frame[self.target_cols].std().to_dict()
             else:
-                # Fallback for inference if no targets exist in DF
                 self.means_target = {k: 0.0 for k in self.target_cols}
                 self.stds_target = {k: 1.0 for k in self.target_cols}
 
-            # Avoid division by zero
-            for k in self.stds:
+            for k in self.stds: 
                 if self.stds[k] == 0: self.stds[k] = 1.0
-            for k in self.stds_target:
+            for k in self.stds_target: 
                 if self.stds_target[k] == 0: self.stds_target[k] = 1.0
 
+    def __len__(self):
+        return len(self.data_frame)
+
+    def generate_cache(self):
+        """
+        Runs the heavy video processing for the entire dataset and saves to cache_dir.
+        Call this ONCE before training.
+        """
+        if not self.cache_dir:
+            print("No cache_dir specified. Skipping cache generation.")
+            return
+
+        print(f"Generating cache in {self.cache_dir}...")
+        
+        # Load model once for the main thread
+        self._get_yolo_model()
+        
+        for idx in tqdm(range(len(self.data_frame)), desc="Caching Trajectories"):
+            row = self.data_frame.iloc[idx]
+            video_name = row['file_name']
+            cache_path = os.path.join(self.cache_dir, f"{video_name}.npz")
+            
+            # Skip if already exists
+            if os.path.exists(cache_path):
+                continue
+                
+            video_path = os.path.join(self.video_root_dir, video_name)
+            
+            # Run Heavy Processing
+            ball_traj, plate_loc, w, h, frames = self._process_video(video_path)
+            
+            # Save compressed numpy
+            np.savez_compressed(
+                cache_path, 
+                ball_traj=ball_traj, 
+                plate_loc=plate_loc, 
+                dims=np.array([w, h]), 
+                total_frames=frames
+            )
+        print("Cache generation complete.")
+
+    def get_stats(self):
+        return {
+            'means': self.means, 'stds': self.stds,
+            'means_target': self.means_target, 'stds_target': self.stds_target
+        }
+
     def save_stats(self, save_path):
-        """
-        Saves the current normalization statistics to a JSON file.
-        Call this on your TRAINING dataset object.
-        """
-        # Helper to convert numpy types to native python types for JSON
         def convert(o):
             if isinstance(o, np.generic): return o.item()
             return o
-
-        stats_dict = {
-            'means': self.means,
-            'stds': self.stds,
-            'means_target': self.means_target,
-            'stds_target': self.stds_target
-        }
-        
+        stats_dict = self.get_stats()
         with open(save_path, 'w') as f:
             json.dump(stats_dict, f, default=convert, indent=4)
-        print(f"Normalization stats saved to {save_path}")
+        print(f"Stats saved to {save_path}")
 
     def denormalize_targets(self, preds_tensor):
-        """
-        Convert model predictions (normalized) back to feet (real world).
-        Args:
-            preds_tensor: Torch tensor of shape (Batch, 2) -> [plate_x, plate_z]
-        Returns:
-            Numpy array of shape (Batch, 2) in feet.
-        """
         preds = preds_tensor.cpu().detach().numpy()
-        
-        # plate_x is index 0, plate_z is index 1
         mean_x = self.means_target['plate_x']
         std_x = self.stds_target['plate_x']
-        
         mean_z = self.means_target['plate_z']
         std_z = self.stds_target['plate_z']
         
-        # Formula: Real = (Norm * Std) + Mean
         real_x = (preds[:, 0] * std_x) + mean_x
         real_z = (preds[:, 1] * std_z) + mean_z
-        
         return np.stack([real_x, real_z], axis=1)
 
     def _get_yolo_model(self):
-        """Lazy loader for the YOLO model."""
         if self.yolo is None:
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
             self.yolo = YOLO(self.yolo_model_path)
@@ -141,52 +160,19 @@ class PitchDataset(Dataset):
         return np.array([(x1 + x2) / 2, (y1 + y2) / 2])
 
     def _apply_kalman_smoothing(self, trajectory):
-        """
-        Applies a Kalman Filter to smooth the 2D trajectory.
-        Assumes trajectory is (N, 2) numpy array and has NO NaNs (interpolated beforehand).
-        """
-        # 4 dynamic params (x, y, dx, dy), 2 measurement params (x, y)
         kf = cv2.KalmanFilter(4, 2)
-        
-        # Measurement Matrix (We measure x and y)
-        kf.measurementMatrix = np.array([[1, 0, 0, 0],
-                                         [0, 1, 0, 0]], np.float32)
-        
-        # Transition Matrix (Constant Velocity Model)
-        # x_new = x_old + dx_old
-        # y_new = y_old + dy_old
-        kf.transitionMatrix = np.array([[1, 0, 1, 0],
-                                        [0, 1, 0, 1],
-                                        [0, 0, 1, 0],
-                                        [0, 0, 0, 1]], np.float32)
-        
-        # Process Noise Covariance (Q) - how much we trust the physics model
-        # Smaller = smoother, Larger = more responsive to sudden changes
+        kf.measurementMatrix = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], np.float32)
+        kf.transitionMatrix = np.array([[1, 0, 1, 0], [0, 1, 0, 1], [0, 0, 1, 0], [0, 0, 0, 1]], np.float32)
         kf.processNoiseCov = np.eye(4, dtype=np.float32) * 0.05
-        
-        # Measurement Noise Covariance (R) - how much we trust the YOLO detections
-        # Larger = ignore noise (smoother), Smaller = trust pixels exactly
         kf.measurementNoiseCov = np.eye(2, dtype=np.float32) * 10.0 
-
-        # Initialize state with the first measured point
-        kf.statePost = np.array([[trajectory[0, 0]], 
-                                 [trajectory[0, 1]], 
-                                 [0], 
-                                 [0]], dtype=np.float32)
+        kf.statePost = np.array([[trajectory[0, 0]], [trajectory[0, 1]], [0], [0]], dtype=np.float32)
         
         smoothed_traj = []
         for point in trajectory:
             measurement = np.array([[np.float32(point[0])], [np.float32(point[1])]])
-            
-            # Predict step (Project state ahead)
             kf.predict()
-            
-            # Correct step (Update with measurement)
             estimated = kf.correct(measurement)
-            
-            # Store the smoothed position (x, y)
             smoothed_traj.append(estimated[:2].flatten())
-            
         return np.array(smoothed_traj)
 
     def _process_video(self, video_path):
@@ -205,10 +191,8 @@ class PitchDataset(Dataset):
 
         ball_centers = []
         plate_centers = []
-
         current_frame_idx = 0
         target_idx_pointer = 0
-
         yolo_model = self._get_yolo_model()
 
         while cap.isOpened() and target_idx_pointer < len(frame_indices):
@@ -218,14 +202,12 @@ class PitchDataset(Dataset):
             if current_frame_idx == frame_indices[target_idx_pointer]:
                 results = yolo_model.predict(frame, verbose=False, conf=0.15, iou=0.15, classes=[1, 2])
                 boxes = results[0].boxes
-
                 ball_found = False
                 if boxes is not None:
                     cls = boxes.cls.cpu().numpy().astype(int)
                     conf = boxes.conf.cpu().numpy()
                     xyxy = boxes.xyxy.cpu().numpy()
 
-                    # Get Ball
                     ball_mask = (cls == self.BALL_CLASS_ID)
                     if np.any(ball_mask):
                         best_idx = np.argmax(conf[ball_mask])
@@ -234,7 +216,6 @@ class PitchDataset(Dataset):
                         ball_centers.append(self._get_box_center(ball_box))
                         ball_found = True
 
-                    # Get Plate
                     plate_mask = (cls == self.HOME_PLATE_CLASS_ID)
                     if np.any(plate_mask):
                          best_idx = np.argmax(conf[plate_mask])
@@ -244,29 +225,23 @@ class PitchDataset(Dataset):
 
                 if not ball_found:
                     ball_centers.append(np.array([np.nan, np.nan]))
-
                 target_idx_pointer += 1
             current_frame_idx += 1
         cap.release()
 
-        # Post Processing
         if len(plate_centers) > 0:
             plate_location = np.median(np.array(plate_centers), axis=0)
         else:
             plate_location = np.array([width / 2, height / 2])
 
         ball_traj = np.array(ball_centers)
-
         if np.all(np.isnan(ball_traj)):
              return np.zeros((self.NUM_FRAMES, 2)), plate_location, width, height, total_frames
 
-        # 1. Linear Interpolation for NaNs (Gaps)
         df_temp = pd.DataFrame(ball_traj, columns=['x', 'y'])
         df_temp = df_temp.interpolate(method='linear', limit_direction='both')
         ball_traj = df_temp.to_numpy()
-        ball_traj = np.nan_to_num(ball_traj) # Fallback if interpolation failed at very ends
-
-        # 2. Kalman Smoothing (Jitter reduction)
+        ball_traj = np.nan_to_num(ball_traj)
         ball_traj = self._apply_kalman_smoothing(ball_traj)
 
         if len(ball_traj) < self.NUM_FRAMES:
@@ -276,22 +251,38 @@ class PitchDataset(Dataset):
         return ball_traj, plate_location, width, height, total_frames
 
     def __getitem__(self, idx):
-        if torch.is_tensor(idx):
-            idx = idx.tolist()
-
+        if torch.is_tensor(idx): idx = idx.tolist()
         row = self.data_frame.iloc[idx]
         video_name = row['file_name']
-        video_path = os.path.join(self.video_root_dir, video_name)
+        
+        # --- CACHE LOGIC ---
+        # 1. Try to load from cache
+        cache_loaded = False
+        if self.cache_dir:
+            cache_path = os.path.join(self.cache_dir, f"{video_name}.npz")
+            if os.path.exists(cache_path):
+                try:
+                    data = np.load(cache_path)
+                    ball_traj_pixels = data['ball_traj']
+                    plate_loc_pixels = data['plate_loc']
+                    dims = data['dims']
+                    w, h = dims[0], dims[1]
+                    total_frames_in_clip = float(data['total_frames'])
+                    cache_loaded = True
+                except Exception as e:
+                    print(f"Error loading cache for {video_name}: {e}")
 
-        # 1. Get Visual Data
-        ball_traj_pixels, plate_loc_pixels, w, h, total_frames_in_clip = self._process_video(video_path)
+        # 2. Fallback to processing (slow) if cache failed/missing
+        if not cache_loaded:
+            video_path = os.path.join(self.video_root_dir, video_name)
+            ball_traj_pixels, plate_loc_pixels, w, h, total_frames_in_clip = self._process_video(video_path)
 
-        # --- PIXEL NORMALIZATION ---
+        # --- PIXEL NORMALIZATION (Fast) ---
         relative_traj = (ball_traj_pixels - plate_loc_pixels) 
         relative_traj[:, 0] = relative_traj[:, 0] / w
         relative_traj[:, 1] = relative_traj[:, 1] / h
 
-        # 2. Get Physics Data
+        # --- PHYSICS DATA ---
         stand = 1.0 if row['stand'] == 'R' else 0.0
         p_throws = 1.0 if row['p_throws'] == 'R' else 0.0
 
@@ -299,30 +290,17 @@ class PitchDataset(Dataset):
             val = float(row[col_name])
             return (val - self.means[col_name]) / (self.stds[col_name] + 1e-6)
 
-        # --- DYNAMIC ToF CALCULATION ---
         mound_dist = 60.5
         total_tof = (mound_dist - row['release_extension']) / (row['release_speed'] * 1.467)
         time_elapsed = total_frames_in_clip / self.fps
         time_remaining = total_tof - time_elapsed
-        
-        # If time_remaining < 0 set to 0
-        if time_remaining < 0:
-            # print("Time remaining calculation < 0.") # Suppress spam
-            time_remaining = 0
+        if time_remaining < 0: time_remaining = 0
 
         physics_norm = np.array([
-            get_norm('release_speed'),
-            get_norm('release_spin_rate'),
-            get_norm('release_extension'),
-            get_norm('pfx_x'),
-            get_norm('pfx_z'),
-            stand,    
-            p_throws, 
-            get_norm('sz_top'),
-            get_norm('sz_bot'),
-            get_norm('release_pos_x'),
-            get_norm('release_pos_y'),
-            get_norm('release_pos_z'),
+            get_norm('release_speed'), get_norm('release_spin_rate'), get_norm('release_extension'),
+            get_norm('pfx_x'), get_norm('pfx_z'), stand, p_throws, 
+            get_norm('sz_top'), get_norm('sz_bot'),
+            get_norm('release_pos_x'), get_norm('release_pos_y'), get_norm('release_pos_z'),
             time_remaining
         ], dtype=np.float32)
 
@@ -341,11 +319,7 @@ class PitchDataset(Dataset):
                 val = float(row[col_name])
                 return (val - self.means_target[col_name]) / (self.stds_target[col_name] + 1e-6)
 
-            labels = np.array([
-                get_norm_target('plate_x'),
-                get_norm_target('plate_z')
-            ], dtype=np.float32)
-
+            labels = np.array([get_norm_target('plate_x'), get_norm_target('plate_z')], dtype=np.float32)
             data['labels'] = torch.tensor(labels, dtype=torch.float32)
             
             if 'pitch_class' in row:
