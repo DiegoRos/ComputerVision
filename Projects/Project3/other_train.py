@@ -146,7 +146,7 @@ def main():
     BATCH_SIZE = 4
     ACCUMULATION_STEPS = 8  # Effective Batch Size = 4 * 8 = 32
     LEARNING_RATE = 1e-4    # Lower, constant LR is safer
-    NUM_EPOCHS = 5
+    NUM_EPOCHS = 1
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Training on device: {device}")
@@ -234,6 +234,7 @@ def main():
     print("\nTraining Complete.")
 
     save_path = f"competition_folder/multitask_model_with_zones_{NUM_EPOCHS}epochs.pth"
+    print(f"Saving model to {save_path}")
     torch.save(model.state_dict(), save_path)
 
 if __name__ == "__main__":
