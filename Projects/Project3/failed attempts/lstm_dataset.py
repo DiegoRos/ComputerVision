@@ -8,6 +8,11 @@ import json
 from ultralytics import YOLO
 from tqdm import tqdm
 
+VALID_ZONES = [ 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14]
+
+# Reverse map for training (Real Zone -> Model Index)
+ZONE_TO_IDX = {z: i for i, z in enumerate(VALID_ZONES)}
+
 class PitchDataset(Dataset):
     def __init__(self, data_frame, video_root_dir, yolo_model_path, transform=None, mode='train', fps=60, stats=None, cache_dir=None):
         """
@@ -47,6 +52,7 @@ class PitchDataset(Dataset):
 
         self.target_cols = ['plate_x', 'plate_z']
 
+
         # 1. Load Stats
         if isinstance(stats, str):
             if os.path.exists(stats):
@@ -83,44 +89,6 @@ class PitchDataset(Dataset):
 
     def __len__(self):
         return len(self.data_frame)
-
-    def generate_cache(self):
-        """
-        Runs the heavy video processing for the entire dataset and saves to cache_dir.
-        Call this ONCE before training.
-        """
-        if not self.cache_dir:
-            print("No cache_dir specified. Skipping cache generation.")
-            return
-
-        print(f"Generating cache in {self.cache_dir}...")
-        
-        # Load model once for the main thread
-        self._get_yolo_model()
-        
-        for idx in tqdm(range(len(self.data_frame)), desc="Caching Trajectories"):
-            row = self.data_frame.iloc[idx]
-            video_name = row['file_name']
-            cache_path = os.path.join(self.cache_dir, f"{video_name}.npz")
-            
-            # Skip if already exists
-            if os.path.exists(cache_path):
-                continue
-                
-            video_path = os.path.join(self.video_root_dir, video_name)
-            
-            # Run Heavy Processing
-            ball_traj, plate_loc, w, h, frames = self._process_video(video_path)
-            
-            # Save compressed numpy
-            np.savez_compressed(
-                cache_path, 
-                ball_traj=ball_traj, 
-                plate_loc=plate_loc, 
-                dims=np.array([w, h]), 
-                total_frames=frames
-            )
-        print("Cache generation complete.")
 
     def get_stats(self):
         return {
@@ -255,27 +223,9 @@ class PitchDataset(Dataset):
         row = self.data_frame.iloc[idx]
         video_name = row['file_name']
         
-        # --- CACHE LOGIC ---
-        # 1. Try to load from cache
-        cache_loaded = False
-        if self.cache_dir:
-            cache_path = os.path.join(self.cache_dir, f"{video_name}.npz")
-            if os.path.exists(cache_path):
-                try:
-                    data = np.load(cache_path)
-                    ball_traj_pixels = data['ball_traj']
-                    plate_loc_pixels = data['plate_loc']
-                    dims = data['dims']
-                    w, h = dims[0], dims[1]
-                    total_frames_in_clip = float(data['total_frames'])
-                    cache_loaded = True
-                except Exception as e:
-                    print(f"Error loading cache for {video_name}: {e}")
-
-        # 2. Fallback to processing (slow) if cache failed/missing
-        if not cache_loaded:
-            video_path = os.path.join(self.video_root_dir, video_name)
-            ball_traj_pixels, plate_loc_pixels, w, h, total_frames_in_clip = self._process_video(video_path)
+       # --- Get Trajectory ---
+        video_path = os.path.join(self.video_root_dir, video_name)
+        ball_traj_pixels, plate_loc_pixels, w, h, total_frames_in_clip = self._process_video(video_path)
 
         # --- PIXEL NORMALIZATION (Fast) ---
         relative_traj = (ball_traj_pixels - plate_loc_pixels) 
@@ -326,7 +276,17 @@ class PitchDataset(Dataset):
                 pitch_class = 1.0 if row['pitch_class'] == 'strike' else 0.0
                 data['class_label'] = torch.tensor(pitch_class, dtype=torch.float32)
             if 'zone' in row:
-                zone = float(row['zone']) if not pd.isna(row['zone']) else 14.0
-                data['zone_label'] = torch.tensor(zone, dtype=torch.long)
+                raw_zone = float(row['zone']) if not pd.isna(row['zone']) else 14.0
+                raw_zone = int(raw_zone)
+                
+                # Check if the zone is valid, otherwise default to 14 (Waste)
+                if raw_zone not in ZONE_TO_IDX:
+                    raw_zone = 14
+                    
+                # Map Real ID (1-14) -> Model Index (0-12)
+                zone_idx = ZONE_TO_IDX[raw_zone]
+                
+                # Use LongTensor for Classification Targets
+                data['zone_label'] = torch.tensor(zone_idx, dtype=torch.long)
 
         return data

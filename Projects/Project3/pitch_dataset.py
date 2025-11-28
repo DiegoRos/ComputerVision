@@ -94,6 +94,7 @@ class PitchDataset(Dataset):
 
         ball_centers = []
         plate_centers = []
+        plate_boxes = []
 
         current_frame_idx = 0
         target_idx_pointer = 0
@@ -137,6 +138,7 @@ class PitchDataset(Dataset):
                          best_idx = np.argmax(conf[plate_mask])
                          real_indices = np.where(plate_mask)[0]
                          plate_box = xyxy[real_indices[best_idx]]
+                         plate_boxes.append(plate_box)
                          plate_centers.append(self._get_box_center(plate_box))
 
                 if not ball_found:
@@ -153,9 +155,14 @@ class PitchDataset(Dataset):
         # Handle Plate (Median)
         if len(plate_centers) > 0:
             plate_location = np.median(np.array(plate_centers), axis=0)
+            # Find idx of the median plate in the original list to get box
+            idx = np.argsort(np.linalg.norm(np.array(plate_centers) - plate_location, axis=1))[0]
+            best_plate_box = plate_boxes[idx]
+
         else:
             # Fallback to center of image if no plate detected
             plate_location = np.array([width / 2, height / 2])
+            best_plate_box = np.array([width / 2 - 50, height / 2 - 10, width / 2 + 50, height / 2 + 10]) # Dummy box
 
         # Handle Ball Trajectory (Interpolation)
         ball_traj = np.array(ball_centers)
@@ -177,7 +184,7 @@ class PitchDataset(Dataset):
             padding = np.zeros((self.NUM_FRAMES - len(ball_traj), 2))
             ball_traj = np.vstack([ball_traj, padding])
 
-        return ball_traj, plate_location
+        return ball_traj, plate_location, best_plate_box
 
     def __getitem__(self, idx):
         if torch.is_tensor(idx):
@@ -189,7 +196,7 @@ class PitchDataset(Dataset):
 
         # --- Extract Visual Data ---
         # Returns (16, 2) and (2,)
-        ball_traj, plate_loc = self._process_video(video_path)
+        ball_traj, plate_loc, best_plate_box = self._process_video(video_path)
 
         # Normalize Trajectory: Centered around plate
         # This makes the model robust to camera panning

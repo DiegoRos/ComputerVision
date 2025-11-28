@@ -17,7 +17,7 @@ from lstm_model import HybridPitchModel
 # --- Configuration ---
 BATCH_SIZE = 4
 GRAD_ACCUMULATION_STEPS = 8
-LEARNING_RATE = 1e-4
+LEARNING_RATE = 1e-3
 NUM_EPOCHS = 5
 
 root_path = Path.cwd()
@@ -31,12 +31,16 @@ VIDEO_ROOT = str(train_video_dir)
 CSV_PATH = str(train_csv_path)
 YOLO_PATH = "./competition_folder/model_output/ball_finetune/weights/best.pt"
 
+VALID_ZONES = [ 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14]
+
+# Reverse map for training (Real Zone -> Model Index)
+ZONE_TO_IDX = {z: i for i, z in enumerate(VALID_ZONES)}
 
 # For training the model we want to create a train/val/test split with a 80/20 spilt
 def create_data_loaders(csv_path, video_dir, yolo_model_dir, batch_size=4, shuffle=True):
     # Load csv
     df = pd.read_csv(str(csv_path))
-    df = df.iloc[0:100] # TEMP: For quick testing, remove this line for full data
+    df = df.iloc[0:1000]
 
     # Create first split (80/20) spliting into train and val/test
     train_df, val_df = train_test_split(
@@ -158,7 +162,7 @@ def get_zone(plate_x, plate_z, sz_top, sz_bot):
 def denormalize_value(val, mean, std):
     return (val * std) + mean
 
-def validate(model, val_loader, criterion, device, dataset_obj):
+def validate(model, val_loader, criterion_reg, criterion_cls, criterion_zone, w_reg, w_cls, w_zone, device, dataset_obj):
     """
     Runs validation loop and calculates:
     1. MSE Loss
@@ -168,7 +172,6 @@ def validate(model, val_loader, criterion, device, dataset_obj):
     """
     model.eval()
     total_loss = 0.0
-    total_mae_feet = 0.0
     num_batches = 0
     
     # Storage for classification metrics
@@ -197,50 +200,39 @@ def validate(model, val_loader, criterion, device, dataset_obj):
             true_zone_labels = batch['zone_label'].cpu().numpy()   # 1-14
             
             # Forward Pass
-            outputs = model(trajectory, physics)
+            pred_coords, pred_class, pred_zone = model(trajectory, physics)
             
             # Loss & MAE
-            loss = criterion(outputs, targets)
+            # Calculate individual losses
+            loss_reg = criterion_reg(pred_coords, targets)
+            loss_cls = criterion_cls(pred_class, batch['class_label'].to(device).view(-1, 1))
+            loss_zone = criterion_zone(pred_zone, batch['zone_label'].to(device).long())
+
+            # Combine
+            loss = (w_reg * loss_reg) + (w_cls * loss_cls) + (w_zone * loss_zone)
             total_loss += loss.item()
             
-            preds_feet = dataset_obj.denormalize_targets(outputs)
-            targets_feet = dataset_obj.denormalize_targets(targets)
+            # --- CONVERT RAW LOGITS TO PREDICTIONS ---
+            # 1. Strike/Ball: Logit > 0 means Probability > 0.5
+            pred_class_binary = (pred_class > 0).long()
             
-            mae = np.mean(np.abs(preds_feet - targets_feet))
-            total_mae_feet += mae
+            # 2. Zone: Get the index with the highest score (Argmax)
+            pred_zone_idx = torch.argmax(pred_zone, dim=1)
             
-            # --- Logic Rule Evaluation ---
-            # We need sz_top and sz_bot to determine the zone.
-            # In dataset.py, 'physics' tensor indices:
-            # 7: sz_top, 8: sz_bot (Normalized)
-            sz_top_norm = physics[:, 7].cpu().numpy()
-            sz_bot_norm = physics[:, 8].cpu().numpy()
-            
-            # Denormalize to get real feet for logic check
-            sz_top_feet = denormalize_value(sz_top_norm, mean_sz_top, std_sz_top)
-            sz_bot_feet = denormalize_value(sz_bot_norm, mean_sz_bot, std_sz_bot)
-            
-            # Loop through batch to apply logic rules
-            for i in range(len(preds_feet)):
-                px = preds_feet[i][0]
-                pz = preds_feet[i][1]
-                top = sz_top_feet[i]
-                bot = sz_bot_feet[i]
-                
-                # Predict Strike/Ball
-                p_class = get_pitch_class(px, pz, top, bot)
-                all_pred_classes.append(p_class)
+            # # Loop predictions in batch
+            for i in range(len(pred_class)):
+                # .item() extracts the value as a standard Python number (on CPU)
+                all_pred_classes.append(pred_class_binary[i].item())
                 all_true_classes.append(int(true_class_labels[i]))
                 
                 # Predict Zone
-                p_zone = get_zone(px, pz, top, bot)
-                all_pred_zones.append(p_zone)
+                all_pred_zones.append(pred_zone_idx[i].item())
                 all_true_zones.append(int(true_zone_labels[i]))
             
             num_batches += 1
             
     avg_loss = total_loss / num_batches
-    avg_mae = total_mae_feet / num_batches
+    # avg_mae = total_mae_feet / num_batches
     
     # --- Print Metrics ---
     print("\n  >>> Classification Metrics:")
@@ -265,7 +257,8 @@ def validate(model, val_loader, criterion, device, dataset_obj):
             z_acc = np.sum(pred_zones_np[mask] == true_zones_np[mask]) / np.sum(mask)
             print(f"    Zone {z}: {z_acc*100:.1f}% ({np.sum(mask)} samples)")
             
-    return avg_loss, avg_mae
+    return avg_loss
+
 
 
 def main():
@@ -292,16 +285,25 @@ def main():
     # 3. Model Setup
     model = HybridPitchModel(physics_dim=13).to(device)
     
-    # Optimizer & Loss
+    # --- CHANGE 2: Learning Rate Scheduler ---
+    # Start with higher LR, then reduce when loss plateaus
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
-    criterion = nn.MSELoss() # Standard regression loss
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2)
+    
+    # --- CHANGE 1: Huber Loss ---
+    # delta=1.0 means it acts as MSE for errors < 1.0 (normalized) and MAE for errors > 1.0
+    criterion_reg = nn.HuberLoss(delta=1.0)
+    criterion_cls = nn.BCEWithLogitsLoss()
+    criterion_zone = nn.CrossEntropyLoss()
 
-    # Initialize best validation loss for saving best model
+    # Weights (Hyperparameters to tune)
+    w_reg = 1.0
+    w_cls = 2.0  # Weight classification higher to break the mean collapse
+    w_zone = 0.5
+
+    print("Starting training...")
     best_val_loss = float('inf')
 
-    # 4. Training Loop
-    print("Starting training...")
-    
     for epoch in range(NUM_EPOCHS):
         model.train()
         epoch_loss = 0.0
@@ -310,24 +312,21 @@ def main():
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{NUM_EPOCHS}", unit="batch")
         
         for batch_idx, batch in enumerate(progress_bar):
-            # Move inputs to device
             trajectory = batch['trajectory'].to(device)
             physics = batch['physics'].to(device)
             targets = batch['labels'].to(device)
             
-            # Forward Pass
-            outputs = model(trajectory, physics)
+            pred_coords, pred_class, pred_zone = model(trajectory, physics)
             
-            # Loss Calculation
-            loss = criterion(outputs, targets)
-            
-            # Normalize loss
-            loss = loss / GRAD_ACCUMULATION_STEPS
-            
-            # Backward Pass
+            # Calculate individual losses
+            loss_reg = criterion_reg(pred_coords, targets)
+            loss_cls = criterion_cls(pred_class, batch['class_label'].to(device).view(-1, 1))
+            loss_zone = criterion_zone(pred_zone, batch['zone_label'].to(device).long())
+
+            # Combine
+            loss = (w_reg * loss_reg) + (w_cls * loss_cls) + (w_zone * loss_zone)
             loss.backward()
             
-            # Gradient Accumulation
             if (batch_idx + 1) % GRAD_ACCUMULATION_STEPS == 0:
                 optimizer.step()
                 optimizer.zero_grad()
@@ -338,15 +337,17 @@ def main():
         if len(train_loader) % GRAD_ACCUMULATION_STEPS != 0:
             optimizer.step()
             optimizer.zero_grad()
-
+        
         # Validation Step
         avg_train_loss = epoch_loss / len(train_loader)
-        val_loss, val_mae = validate(model, val_loader, criterion, device, val_dataset)
+        val_loss = validate(model, val_loader, criterion_reg, criterion_cls, criterion_zone, w_reg, w_cls, w_zone, device, val_dataset)
+        
+        # Step the scheduler based on validation loss
+        scheduler.step(val_loss)
         
         print(f"\nEpoch {epoch+1} Summary:")
         print(f"  Train MSE (Norm): {avg_train_loss:.4f}")
         print(f"  Val MSE (Norm)  : {val_loss:.4f}")
-        print(f"  Val MAE (Real)  : {val_mae:.4f} feet")
         
         # Save Best Model Logic
         if val_loss < best_val_loss:

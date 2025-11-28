@@ -189,16 +189,6 @@ def main():
     # IMPORTANT: batch_size=1 and shuffle=False to easily match filenames
     test_loader = DataLoader(test_ds, batch_size=1, shuffle=False, num_workers=0)
 
-
-    """print(val_df.head())
-    sample = next(iter(test_loader))
-    print("BATCH KEYS:", sample.keys())
-    #print("file_name inside batch:", sample.get("file_name"))
-
-    # quick sanity
-    sample = val_ds[0]
-    print("Sample keys:", list(sample.keys()))
-    """
     # --------- MODEL ----------
     model = MultiTaskPitchModel(physics_dim=9).to(device)
     if os.path.exists(MODEL_WEIGHTS_PATH):

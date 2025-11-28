@@ -33,7 +33,7 @@ TEST_CSV_PATH = data_path / "test_features.csv"
 YOLO_PATH = "./competition_folder/model_output/ball_finetune/weights/best.pt"
 
 MODEL_NAME= "multitask_model_20epochs.pth"
-MODEL_WEIGHTS_PATH = f"/content/drive/MyDrive/Fall 2025/CS-GY 6643 Computer Vision/Project 3/competition_folder/{MODEL_NAME}"
+MODEL_WEIGHTS_PATH = f"competition_folder/{MODEL_NAME}"
 
 zone_map = {
     1:0, 2:1, 3:2, 
